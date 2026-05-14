@@ -206,6 +206,17 @@ fi
 apply_config
 remove_uhttpd_dependency
 
+# Fetch UA3F openwrt package
+UA3F_REPO="${UA3F_REPO:-https://github.com/sol-long/UA3F.git}"
+UA3F_BRANCH="${UA3F_BRANCH:-master}"
+UA3F_SRC="$BASE_PATH/../$BUILD_DIR/package/ua3f_src"
+if [ ! -d "$UA3F_SRC" ]; then
+    git clone --depth 1 --branch "$UA3F_BRANCH" "$UA3F_REPO" "$UA3F_SRC"
+fi
+if [ ! -e "$BASE_PATH/../$BUILD_DIR/package/ua3f" ]; then
+    ln -s ua3f_src/openwrt "$BASE_PATH/../$BUILD_DIR/package/ua3f"
+fi
+
 cd "$BASE_PATH/../$BUILD_DIR"
 make defconfig
 
