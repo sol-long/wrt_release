@@ -56,6 +56,7 @@ jobs:
           sudo -E timedatectl set-timezone "Asia/Shanghai"
           export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          echo "BRANCH_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
 
       - name: Pre Clone
         run: ./wrt_core/pre_clone_action.sh ${{ inputs.model }}
@@ -148,5 +149,5 @@ jobs:
       - name: Upload Firmware
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.BUILD_DATE }}_${{ inputs.model }}
+          name: ${{ env.BUILD_DATE }}_${{ inputs.model }}_${{ env.BRANCH_NAME }}
           path: ./firmware/*.*
