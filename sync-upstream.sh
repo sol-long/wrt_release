@@ -2,16 +2,46 @@
 # ============================================================
 # fork 同步脚本
 #   用法: ./sync-upstream.sh
-#   作用: 将 main 分支同步到上游最新，然后 rebase 所有 lite_* 分支
+#   作用: 将 main 同步到上游，然后按层级 rebase 所有分支
+#
+#   分支层级:
+#     main (上游跟踪 + 自定义精简)
+#       └── lite (+ 精简增强 + dl cache)
+#             ├── lite_nikki (+ nikki 代理)
+#             │     └── lite_nikki_UA3F (+ UA3F)
+#             │           └── lite_bandix_nikki_UA3F (+ bandix + argon)
+#             ├── lite_bandix (+ bandix + argon, 无代理)
+#             │     └── lite_bandix_UA3F (+ UA3F)
+#             └── lite_bandix_openclash (+ openclash + bandix + argon)
+#                   └── lite_bandix_openclash_UA3F (+ UA3F)
 # ============================================================
 set -euo pipefail
 
 UPSTREAM_URL="https://github.com/ZqinKing/wrt_release.git"
 PATCH_FILE="../custom.patch"
-LITE_BRANCHES=(
+
+# 下级分支及其父分支 (按拓扑序，父在先)
+declare -A CHILD_OF=(
+    [lite]=main
+    [lite_nikki]=lite
+    [lite_nikki_UA3F]=lite_nikki
+    [lite_bandix_nikki_UA3F]=lite_nikki_UA3F
+    [lite_bandix]=lite
+    [lite_bandix_UA3F]=lite_bandix
+    [lite_bandix_openclash]=lite
+    [lite_bandix_openclash_UA3F]=lite_bandix_openclash
+)
+
+# 处理顺序 (保证父先于子被 rebase)
+ORDERED_BRANCHES=(
+    lite
     lite_nikki
     lite_nikki_UA3F
     lite_bandix_nikki_UA3F
+    lite_bandix
+    lite_bandix_UA3F
+    lite_bandix_openclash
+    lite_bandix_openclash_UA3F
 )
 
 # ---- 颜色 ----
@@ -39,25 +69,27 @@ setup_upstream() {
     fi
 }
 
-# ---- 2. 保存当前分支，切回 main ----
-save_and_switch() {
+# ---- 2. 保存当前分支 ----
+save_branch() {
     ORIG_BRANCH=$(git branch --show-current)
-    log_info "当前分支: $ORIG_BRANCH，切换到 main"
-    git checkout main
+    log_info "当前分支: $ORIG_BRANCH"
 }
 
-# ---- 3. 同步 main -> 上游 ----
+# ---- 3. 同步 main -> 上游 (patch 方式) ----
 sync_main() {
     log_info "拉取上游最新..."
     git fetch --no-tags upstream
 
-    log_info "生成自定义补丁 (相对 upstream/main)..."
-    git diff upstream/main...main > "$PATCH_FILE"
+    log_info "切换到 main..."
+    git checkout main
 
-    if [ ! -s "$PATCH_FILE" ]; then
-        log_warn "补丁为空（main 和上游完全一致），跳过应用"
-    else
-        log_info "补丁已保存到 $PATCH_FILE ($(wc -l < "$PATCH_FILE") 行)"
+    log_info "生成自定义补丁 (相对 upstream/main)..."
+    if git diff upstream/main...main > "$PATCH_FILE"; then
+        if [ -s "$PATCH_FILE" ]; then
+            log_info "补丁已保存: $PATCH_FILE ($(wc -l < "$PATCH_FILE") 行)"
+        else
+            log_warn "补丁为空，main 和上游完全一致"
+        fi
     fi
 
     log_info "重置 main 到 upstream/main..."
@@ -69,20 +101,21 @@ sync_main() {
             log_info "补丁应用成功"
         else
             log_error "补丁冲突！请手动解决。补丁文件: $PATCH_FILE"
-            log_error "解决后执行: git commit -a -m 'sync upstream' && git push origin main -f"
+            log_error "解决后: git commit -a -m 'sync upstream' && git push origin main -f"
             exit 1
         fi
     fi
 
-    log_info "提交并推送到 origin/main..."
-    git commit -a -m "sync: rebase onto upstream/main" || log_warn "无变更可提交"
+    log_info "提交并推送 main..."
+    git commit -a -m "sync: rebase onto upstream/main" || log_warn "main 无变更可提交"
     git push origin main --force-with-lease
 }
 
-# ---- 4. rebase 各 lite_* 分支 ----
-rebase_lite_branches() {
-    for branch in "${LITE_BRANCHES[@]}"; do
-        log_info "--- 处理 $branch ---"
+# ---- 4. 逐级 rebase 各分支 ----
+rebase_children() {
+    for branch in "${ORDERED_BRANCHES[@]}"; do
+        local parent="${CHILD_OF[$branch]}"
+        log_info "--- ${parent} → ${branch} ---"
 
         if ! git rev-parse --verify "origin/$branch" &>/dev/null; then
             log_warn "跳过: 远程没有 $branch"
@@ -91,29 +124,14 @@ rebase_lite_branches() {
 
         git checkout "$branch"
 
-        # 生成补丁（该分支相对 main）
-        local patch_file="../${branch}.patch"
-        log_info "生成 $branch 补丁..."
-        git diff main...HEAD > "$patch_file"
-        log_info "补丁: $patch_file ($(wc -l < "$patch_file") 行)"
-
-        # 重置到 main
-        log_info "重置 $branch 到 main..."
-        git reset --hard main
-
-        # 应用补丁
-        if [ -s "$patch_file" ]; then
-            log_info "应用补丁到 $branch..."
-            if git apply --3way "$patch_file"; then
-                log_info "$branch 补丁应用成功"
-            else
-                log_error "补丁冲突在 $branch！补丁文件: $patch_file"
-                log_error "手动解决冲突后执行: git commit -a -m 'rebase ${branch}' && git push origin $branch -f"
-                exit 1
-            fi
+        if git rebase "$parent"; then
+            log_info "$branch rebase 成功"
+        else
+            log_error "$branch rebase 到 $parent 失败，请手动解决冲突"
+            log_error "解决后: git rebase --continue && git push origin $branch --force-with-lease"
+            exit 1
         fi
 
-        git commit -a -m "rebase: ${branch} onto updated main" || log_warn "$branch 无变更可提交"
         git push origin "$branch" --force-with-lease
     done
 }
@@ -129,9 +147,9 @@ restore_branch() {
 # ==============================
 log_info "======== Fork 同步开始 ========"
 setup_upstream
-save_and_switch
+save_branch
 sync_main
-rebase_lite_branches
+rebase_children
 restore_branch
 log_info "======== 同步完成 ========"
-log_info "补丁已保留，如需清理: rm ../*.patch"
+[ -s "$PATCH_FILE" ] && log_info "补丁文件保留: $PATCH_FILE (可手动删除)"
